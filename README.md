@@ -78,7 +78,7 @@ Each result contains:
 | Setting | Default | Description |
 |---|---:|---|
 | `protocol` | `api` | Connection method: `api`, `sftp`, or `samba`. |
-| `verify_ssl` | `true` | Verifies the HTTPS certificates. |
+| `verify_ssl` | `true` | SSL certificates verification. |
 | `host` | `host.docker.internal` | NAS hostname or IP address reachable from the Open WebUI container. |
 | `port` | Protocol default | Optional custom server port. |
 | `search_count` | `20` | Maximum number of search results to return. |
