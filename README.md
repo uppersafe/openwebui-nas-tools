@@ -1,2 +1,117 @@
-# openwebui-nas-tools
+# Open WebUI NAS tools
+
 Search on NAS for information and fetch specific file content using Open WebUI's RAG engine.
+
+## Features
+
+- Extracts keywords from search query and builds search pattern.
+- Searches for files recursively.
+- Ranks results using similarity scoring and modification time.
+- Downloads and inspects files (except image, audio, and video files).
+- Caches uploaded files by content hash to avoid processing unchanged files multiple times.
+- Stores credentials in User Valves settings.
+- Supports multiple protocols:
+  - Synology DSM/FileStation API (including OTP prompt for authentication)
+  - SFTP
+  - Samba/SMB
+
+## Available tools
+
+### `search_nas_files`
+
+Searches for files on the NAS and returns metadata.
+
+Parameters:
+
+| Parameter | Description |
+|---|---|
+| `query` | Search query. |
+| `path` | Root directory for recursive search. Defaults to `/`. |
+
+Each result contains:
+
+- Filename
+- Absolute path
+- Size in bytes
+- Access time
+- Modification time
+- Search score
+
+### `inspect_nas_files`
+
+Inspects specific files content and uses Open WebUI's retrieval engine to fetch relevant parts.
+
+Parameters:
+
+| Parameter | Description |
+|---|---|
+| `query` | Search query. |
+| `files` | List of NAS files. |
+
+Each result contains:
+
+- Filename
+- Open WebUI file ID
+- Text snippets
+
+## Installation
+
+1. Go to Workspace in Open WebUI.
+2. Create a new tool from the Tools tab.
+3. Paste the content of `openwebui_nas_tools.py` and save the tool.
+4. Configure the NAS username and password for each user.
+5. Configure the tool valves to change default settings.
+6. Enable the tool in your custom model.
+
+## Configuration
+
+### User Valves
+
+| Setting | Description |
+|---|---|
+| `username` | NAS account username. |
+| `password` | NAS account password. |
+
+### Tool Valves
+
+| Setting | Default | Description |
+|---|---:|---|
+| `protocol` | `api` | Connection method: `api`, `sftp`, or `samba`. |
+| `verify_ssl` | `true` | Verifies the HTTPS certificates. |
+| `host` | `host.docker.internal` | NAS hostname or IP address reachable from the Open WebUI container. |
+| `port` | Protocol default | Optional custom server port. |
+| `search_count` | `20` | Maximum number of search results to return. |
+| `search_timeout` | `60` | Maximum search task duration in seconds. |
+
+When `port` is not set, the protocol default port is used:
+
+| Protocol | Default port |
+|---|---:|
+| DSM/FileStation API | `5001` |
+| SFTP | `22` |
+| Samba/SMB | `445` |
+
+## Security
+
+- Enable encryption to store credentials (set a strong `WEBUI_SECRET_KEY` and set `ENABLE_VALVE_ENCRYPTION` to `true`).
+- Do not use an administrator account.
+- Restrict network access between Open WebUI and the NAS.
+
+## Compatibility
+
+Tested with **Open WebUI 0.10.2**.
+
+The tool imports internal Open WebUI modules, so compatibility with earlier or later releases is not guaranteed.
+
+## Requirements
+
+Allow Open WebUI to install listed requirements (set `ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS` to `true` and `OFFLINE_MODE` to `false`).
+
+The tool relies on 3rd party Python packages:
+- [requests](https://github.com/psf/requests) (for Synology API)
+- [paramiko](https://github.com/paramiko/paramiko) (for SFTP)
+- [smbprotocol](https://github.com/jborean93/smbprotocol) (for Samba/SMB)
+
+## License
+
+[GNU AGPLv3](LICENSE)
