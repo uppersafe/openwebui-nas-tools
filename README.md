@@ -7,8 +7,9 @@ Search on NAS for information and fetch specific file content using Open WebUI's
 - Extracts keywords from search query and builds search pattern.
 - Searches for files recursively.
 - Ranks results using similarity scoring and modification time.
-- Downloads and inspects files (except image, audio, and video files).
+- Downloads files and processes content (except image, audio, and video files).
 - Caches uploaded files by content hash to avoid processing unchanged files multiple times.
+- Inspects files and retrieve relevant parts.
 - Stores credentials in User Valves settings.
 - Supports multiple protocols:
   - Synology DSM/FileStation API (including OTP prompt for authentication)
