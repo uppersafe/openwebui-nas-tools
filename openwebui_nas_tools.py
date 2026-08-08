@@ -4,7 +4,7 @@ author: Nicolas THIBAUT
 git_url: https://github.com/uppersafe/
 description: Search on NAS for information and fetch specific file content.
 license: AGPL-3.0-only
-version: 1.0.0
+version: 1.0.1
 required_open_webui_version: 0.10.2
 requirements: requests, paramiko, smbprotocol
 """
@@ -433,11 +433,11 @@ class Tools:
         results = []
         timeout = timeout or int(time.monotonic() + self.valves.search_timeout)
 
-        # Build search keywords
-        keywords = self._build_keywords(query)
+        # Extract search keywords
+        keywords = self._extract_keywords(query)
 
-        # Compile search pattern
-        pattern = self._compile_keywords(keywords)
+        # Build search pattern
+        pattern = self._build_pattern(keywords)
 
         # Start search task
         search_id = session.api_fs_search_start(pattern, path)
@@ -493,8 +493,8 @@ class Tools:
         results = []
         timeout = timeout or int(time.monotonic() + self.valves.search_timeout)
 
-        # Build search keywords
-        keywords = self._build_keywords(query)
+        # Extract search keywords
+        keywords = self._extract_keywords(query)
 
         try:
             if int(time.monotonic()) >= timeout:
@@ -539,8 +539,8 @@ class Tools:
         results = []
         timeout = timeout or int(time.monotonic() + self.valves.search_timeout)
 
-        # Build search keywords
-        keywords = self._build_keywords(query)
+        # Extract search keywords
+        keywords = self._extract_keywords(query)
 
         try:
             if int(time.monotonic()) >= timeout:
@@ -683,11 +683,6 @@ class Tools:
             "search_score": score,
         }
 
-    def _is_media(self, mimetype: str) -> bool:
-        if mimetype is not None:
-            return mimetype.startswith(("image/", "audio/", "video/"))
-        return False
-
     def _sort_results(self, results: list) -> list:
         return sorted(
             results,
@@ -695,11 +690,16 @@ class Tools:
             reverse=True,
         )[: self.valves.search_count]
 
-    def _compile_keywords(self, keywords: list) -> str:
+    def _is_media(self, mimetype: str) -> bool:
+        if mimetype is not None:
+            return mimetype.startswith(("image/", "audio/", "video/"))
+        return False
+
+    def _build_pattern(self, keywords: list) -> str:
         # Replace non ascii characters by ?
         return str(" || ").join(keywords).encode("ascii", "replace").decode()
 
-    def _build_keywords(self, query: str) -> list:
+    def _extract_keywords(self, query: str) -> list:
         if query is None or len(query) == 0:
             return []
 
@@ -869,7 +869,7 @@ class Tools:
 
         :param query: The search query to use for RAG
         :param files: A list of path for files to look into
-        :return: JSON with search results containing filename, file ID and snippets for each result
+        :return: JSON with search results containing filename, file ID and snippets for each file
         """
         session = None
         try:
