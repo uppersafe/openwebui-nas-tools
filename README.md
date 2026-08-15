@@ -40,7 +40,7 @@ Each result contains:
 
 ### `inspect_nas_files`
 
-Inspects specific files content and uses Open WebUI's retrieval engine to fetch relevant parts.
+Retrieves specific files from NAS and uses Open WebUI's retrieval engine to find relevant parts.
 
 Parameters:
 
@@ -54,6 +54,22 @@ Each result contains:
 - Filename
 - Open WebUI file ID
 - Text snippets
+
+### `fetch_nas_files`
+
+Retrieves specific files from NAS and uses Open WebUI's file upload system to generate download links.
+
+Parameters:
+
+| Parameter | Description |
+|---|---|
+| `files` | List of NAS files. |
+
+Each result contains:
+
+- Filename
+- Open WebUI file ID
+- Download URL
 
 ## Installation
 
