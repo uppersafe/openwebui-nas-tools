@@ -4,7 +4,7 @@ author: Nicolas THIBAUT
 git_url: https://github.com/uppersafe/
 description: Search on NAS for information and fetch specific file content.
 license: AGPL-3.0-only
-version: 1.1.0
+version: 1.1.2
 required_open_webui_version: 0.10.2
 requirements: requests, paramiko, smbprotocol
 """
@@ -684,6 +684,7 @@ class Tools:
         }
 
     def _sort_results(self, results: list) -> list:
+        # Sort files by score from newest to oldest
         return sorted(
             results,
             key=lambda result: (result["search_score"], result["st_mtime"]),
@@ -858,7 +859,7 @@ class Tools:
         Best to quickly identify relevant files.
 
         :param query: The search query to look up without special operators or wildcards
-        :param path: The root directory to recursively look into
+        :param path: The root directory to recursively look into (optional)
         :return: JSON with results containing filename, absolute path, size in bytes, access time, modification time and search score of each file
         """
         session = None
@@ -959,32 +960,28 @@ class Tools:
 
             collections = []
 
-            for file in files:
-                try:
-                    filename = os.path.basename(file)
-                    mimetype, encoding = mimetypes.guess_type(filename)
+            for path in files:
+                filename = os.path.basename(path)
+                mimetype, encoding = mimetypes.guess_type(filename)
 
-                    # Exclude image, audio and video files
-                    if self._is_media(mimetype):
-                        raise TypeError(f"Invalid content type '{mimetype}'")
+                # Exclude audio and video files
+                if self._is_media(mimetype, checklist=["audio/", "video/"]):
+                    raise TypeError(f"Invalid mimetype '{mimetype}' for '{path}'")
 
-                    log.info(f"Downloading '{file}'")
-                    content = await asyncio.to_thread(download_handler, session, file)
+                log.info(f"Downloading '{path}'")
+                content = await asyncio.to_thread(download_handler, session, path)
 
-                    # Upload file and process content
-                    file_id, file_collection = await self._upload_file(
-                        filename,
-                        mimetype,
-                        content,
-                        process=True,
-                        user=user,
-                        __request__=__request__,
-                    )
+                # Upload file and process content
+                file_id, file_collection = await self._upload_file(
+                    filename,
+                    mimetype,
+                    content,
+                    process=True,
+                    user=user,
+                    __request__=__request__,
+                )
 
-                    collections.append(file_collection)
-
-                except Exception as e:
-                    log.warning(f"Cannot inspect '{file}' ({e})")
+                collections.append(file_collection)
 
             # Query the collection using the retrieval engine
             collection_results = await query_collection_handler(
@@ -1088,44 +1085,46 @@ class Tools:
 
             results = {}
 
-            for file in files:
-                try:
-                    filename = os.path.basename(file)
-                    mimetype, encoding = mimetypes.guess_type(filename)
+            for path in files:
+                filename = os.path.basename(path)
+                mimetype, encoding = mimetypes.guess_type(filename)
 
-                    # Exclude video files
-                    if self._is_media(mimetype, checklist=["video/"]):
-                        raise TypeError(f"Invalid content type '{mimetype}'")
+                # Exclude video files
+                if self._is_media(mimetype, checklist=["video/"]):
+                    raise TypeError(f"Invalid mimetype '{mimetype}' for '{path}'")
 
-                    log.info(f"Downloading '{file}'")
-                    content = await asyncio.to_thread(download_handler, session, file)
+                log.info(f"Downloading '{path}'")
+                content = await asyncio.to_thread(download_handler, session, path)
 
-                    # Upload file but do not process content
-                    file_id, file_collection = await self._upload_file(
-                        filename,
-                        mimetype,
-                        content,
-                        process=False,
-                        user=user,
-                        __request__=__request__,
-                    )
+                # Upload file but do not process content
+                file_id, file_collection = await self._upload_file(
+                    filename,
+                    mimetype,
+                    content,
+                    process=False,
+                    user=user,
+                    __request__=__request__,
+                )
 
-                    # Build download link
-                    results.update(
-                        {
-                            file_id: {
-                                "filename": filename,
-                                "id": file_id,
-                                "url": (
-                                    f'{str(__request__.base_url).rstrip("/")}'
-                                    f"/api/v1/files/{file_id}/content?attachment=true"
-                                ),
-                            }
+                # Build download link
+                results.update(
+                    {
+                        file_id: {
+                            "filename": filename,
+                            "id": file_id,
+                            "url": (
+                                f'{str(__request__.base_url).rstrip("/")}'
+                                f"/api/v1/files/{file_id}/content?attachment=true"
+                            ),
                         }
-                    )
+                    }
+                )
 
-                except Exception as e:
-                    log.warning(f"Cannot fetch '{file}' ({e})")
+            await self._emit_status(
+                __event_emitter__,
+                f"{len(results)} results found.",
+                done=True,
+            )
 
             return json.dumps(list(results.values()), ensure_ascii=False)
 
