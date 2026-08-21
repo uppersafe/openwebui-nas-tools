@@ -4,7 +4,7 @@ author: Nicolas THIBAUT
 git_url: https://github.com/uppersafe/
 description: Search on NAS for information and fetch specific file content.
 license: AGPL-3.0-only
-version: 1.1.2
+version: 1.2.0
 required_open_webui_version: 0.10.2
 requirements: requests, paramiko, smbprotocol
 """
@@ -428,6 +428,7 @@ class Tools:
         session,
         query: str,
         path: str,
+        filetypes: list,
         timeout: int = None,
     ) -> list:
         results = []
@@ -457,16 +458,17 @@ class Tools:
 
             for entry in entries:
                 entry_stat = entry.get("additional")
-                results.append(
-                    self._score_file(
-                        entry.get("name"),
-                        entry.get("path"),
-                        entry_stat.get("size"),
-                        entry_stat.get("time").get("atime"),
-                        entry_stat.get("time").get("mtime"),
-                        keywords,
+                if self._filter_ext(entry.get("name"), filetypes):
+                    results.append(
+                        self._score_file(
+                            entry.get("name"),
+                            entry.get("path"),
+                            entry_stat.get("size"),
+                            entry_stat.get("time").get("atime"),
+                            entry_stat.get("time").get("mtime"),
+                            keywords,
+                        )
                     )
-                )
 
             # Verify task status
             if len(results) != total:
@@ -488,6 +490,7 @@ class Tools:
         session,
         query: str,
         path: str,
+        filetypes: list,
         timeout: int = None,
     ) -> list:
         results = []
@@ -506,20 +509,24 @@ class Tools:
                 entry_path = os.path.join(path, entry.filename)
                 if stat.S_ISDIR(entry.st_mode):
                     for result in self._browse_sftp(
-                        session, query, entry_path, timeout
+                        session,
+                        query,
+                        entry_path,
+                        timeout,
                     ):
                         results.append(result)
                 elif stat.S_ISREG(entry.st_mode):
-                    results.append(
-                        self._score_file(
-                            entry.filename,
-                            entry_path,
-                            entry.st_size,
-                            entry.st_atime,
-                            entry.st_mtime,
-                            keywords,
+                    if self._filter_ext(entry.filename, filetypes):
+                        results.append(
+                            self._score_file(
+                                entry.filename,
+                                entry_path,
+                                entry.st_size,
+                                entry.st_atime,
+                                entry.st_mtime,
+                                keywords,
+                            )
                         )
-                    )
                 elif stat.S_ISLNK(entry.st_mode):
                     log.warning(f"Skipping link {entry_path}")
 
@@ -534,6 +541,7 @@ class Tools:
         session,
         query: str,
         path: str,
+        filetypes: list,
         timeout: int = None,
     ) -> list:
         results = []
@@ -552,20 +560,24 @@ class Tools:
                 entry_stat = entry.stat(follow_symlinks=False)
                 if entry.is_dir():
                     for result in self._browse_samba(
-                        session, query, entry.path, timeout
+                        session,
+                        query,
+                        entry.path,
+                        timeout,
                     ):
                         results.append(result)
                 elif entry.is_file():
-                    results.append(
-                        self._score_file(
-                            entry.name,
-                            entry.path,
-                            entry_stat.st_size,
-                            entry_stat.st_atime,
-                            entry_stat.st_mtime,
-                            keywords,
+                    if self._filter_ext(entry.name, filetypes):
+                        results.append(
+                            self._score_file(
+                                entry.name,
+                                entry.path,
+                                entry_stat.st_size,
+                                entry_stat.st_atime,
+                                entry_stat.st_mtime,
+                                keywords,
+                            )
                         )
-                    )
                 elif entry.is_symlink():
                     log.warning(f"Skipping link {entry.path}")
 
@@ -623,6 +635,16 @@ class Tools:
             raise ValueError("Please configure NAS password")
 
         return config.username.strip(), config.password.strip()
+
+    def _filter_ext(self, filename: str, filetypes: list) -> bool:
+        extension = os.path.splitext(filename)[-1]
+        if filetypes:
+            for filetype in filetypes:
+                if extension == filetype or extension == f".{filetype}":
+                    return True
+        else:
+            return True
+        return False
 
     def _seq_match(self, text: str, keywords: list) -> list:
         # Normalize text in ascii characters
@@ -849,6 +871,7 @@ class Tools:
         self,
         query: str,
         path: str = "/",
+        filetypes: list = [],
         __request__: Request = None,
         __user__: dict = None,
         __event_emitter__=None,
@@ -860,6 +883,7 @@ class Tools:
 
         :param query: The search query to look up without special operators or wildcards
         :param path: The root directory to recursively look into (optional)
+        :param filetypes: A list of file extensions to look for (optional)
         :return: JSON with results containing filename, absolute path, size in bytes, access time, modification time and search score of each file
         """
         session = None
@@ -891,7 +915,13 @@ class Tools:
             )
 
             # Browse files on NAS
-            results = await asyncio.to_thread(browse_handler, session, query, path)
+            results = await asyncio.to_thread(
+                browse_handler,
+                session,
+                query,
+                path,
+                filetypes,
+            )
 
             await self._emit_status(
                 __event_emitter__,
