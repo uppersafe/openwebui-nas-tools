@@ -4,7 +4,7 @@ author: Nicolas THIBAUT
 git_url: https://github.com/uppersafe/
 description: Search on NAS for information and fetch specific file content.
 license: AGPL-3.0-only
-version: 1.2.0
+version: 1.2.1
 required_open_webui_version: 0.10.2
 requirements: requests, paramiko, smbprotocol
 """
@@ -27,7 +27,8 @@ from hashlib import blake2b
 from difflib import SequenceMatcher
 from fastapi import Request, UploadFile
 from pydantic import BaseModel, Field
-
+from contextvars import ContextVar
+from functools import wraps
 from open_webui.models.config import Config
 from open_webui.models.files import Files
 from open_webui.models.users import UserModel
@@ -303,6 +304,63 @@ class SynologyClient:
         return response
 
 
+def with_session(func):
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        session = None
+        token = None
+
+        try:
+            __request__ = kwargs.get("__request__", None)
+            __user__ = kwargs.get("__user__", None)
+            __event_emitter__ = kwargs.get("__event_emitter__", None)
+            __event_call__ = kwargs.get("__event_call__", None)
+
+            if __request__ is None:
+                raise ValueError("Request context not available")
+            if __user__ is None:
+                raise ValueError("User context not available")
+
+            user = UserModel(**__user__)
+            username, password = self._get_credentials(__user__.get("valves"))
+
+            # Get handlers depending on protocol
+            connect_handler, browse_handler, download_handler = self._get_handlers()
+
+            await self._emit_status(
+                __event_emitter__,
+                "Connecting to NAS...",
+                done=False,
+            )
+
+            # Connect to NAS
+            session = await connect_handler(username, password, __event_call__)
+
+            # Set context for this call
+            token = self.context.set((user, session, browse_handler, download_handler))
+
+            return await func(self, *args, **kwargs)
+
+        except SynologyAPIException as e:
+            log.error(f"{e} = {e.error}")
+            return json.dumps({"error": str(e)})
+
+        except Exception as e:
+            log.exception(e)
+            return json.dumps({"error": str(e)})
+
+        finally:
+            # Reset context for this call
+            if token is not None:
+                self.context.reset(token)
+
+            # Disconnect from NAS
+            if session is not None:
+                self._disconnect(session)
+
+    return wrapper
+
+
 class Tools:
     class UserValves(BaseModel):
         username: str = Field(
@@ -355,6 +413,7 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+        self.context = ContextVar("tools.nas")
         self.namespace = "tools.nas.files"
 
     async def _connect_api(
@@ -867,6 +926,7 @@ class Tools:
             )
         return None
 
+    @with_session
     async def search_nas_files(
         self,
         query: str,
@@ -886,63 +946,32 @@ class Tools:
         :param filetypes: A list of file extensions to look for (optional)
         :return: JSON with results containing filename, absolute path, size in bytes, access time, modification time and search score of each file
         """
-        session = None
-        try:
-            if __request__ is None:
-                raise ValueError("Request context not available")
-            if __user__ is None:
-                raise ValueError("User context not available")
+        user, session, browse_handler, download_handler = self.context.get()
 
-            user = UserModel(**__user__)
-            username, password = self._get_credentials(__user__.get("valves"))
+        await self._emit_status(
+            __event_emitter__,
+            "Searching on NAS...",
+            done=False,
+        )
 
-            # Get handlers depending on protocol
-            connect_handler, browse_handler, download_handler = self._get_handlers()
+        # Browse files on NAS
+        results = await asyncio.to_thread(
+            browse_handler,
+            session,
+            query,
+            path,
+            filetypes,
+        )
 
-            await self._emit_status(
-                __event_emitter__,
-                "Connecting to NAS...",
-                done=False,
-            )
+        await self._emit_status(
+            __event_emitter__,
+            f"{len(results)} files found.",
+            done=True,
+        )
 
-            # Connect to NAS
-            session = await connect_handler(username, password, __event_call__)
+        return json.dumps(list(results), ensure_ascii=False)
 
-            await self._emit_status(
-                __event_emitter__,
-                "Searching on NAS...",
-                done=False,
-            )
-
-            # Browse files on NAS
-            results = await asyncio.to_thread(
-                browse_handler,
-                session,
-                query,
-                path,
-                filetypes,
-            )
-
-            await self._emit_status(
-                __event_emitter__,
-                f"{len(results)} files found.",
-                done=True,
-            )
-
-            return json.dumps(list(results), ensure_ascii=False)
-
-        except SynologyAPIException as e:
-            log.error(f"{e} = {e.error}")
-            return json.dumps({"error": str(e)})
-
-        except Exception as e:
-            log.exception(e)
-            return json.dumps({"error": str(e)})
-
-        finally:
-            # Disconnect from NAS
-            self._disconnect(session)
-
+    @with_session
     async def inspect_nas_files(
         self,
         query: str,
@@ -960,116 +989,83 @@ class Tools:
         :param files: A list of path for files to look into
         :return: JSON with results containing filename, file ID and search snippets for each file
         """
-        session = None
-        try:
-            if __request__ is None:
-                raise ValueError("Request context not available")
-            if __user__ is None:
-                raise ValueError("User context not available")
+        user, session, browse_handler, download_handler = self.context.get()
 
-            user = UserModel(**__user__)
-            username, password = self._get_credentials(__user__.get("valves"))
+        await self._emit_status(
+            __event_emitter__,
+            f"Inspecting {len(files)} files...",
+            done=False,
+        )
 
-            # Get handlers depending on protocol
-            connect_handler, browse_handler, download_handler = self._get_handlers()
+        collections = []
 
-            await self._emit_status(
-                __event_emitter__,
-                "Connecting to NAS...",
-                done=False,
+        for path in files:
+            filename = os.path.basename(path)
+            mimetype, encoding = mimetypes.guess_type(filename)
+
+            # Exclude audio and video files
+            if self._is_media(mimetype, checklist=["audio/", "video/"]):
+                raise TypeError(f"Invalid mimetype '{mimetype}' for '{path}'")
+
+            log.info(f"Downloading '{path}'")
+            content = await asyncio.to_thread(download_handler, session, path)
+
+            # Upload file and process content
+            file_id, file_collection = await self._upload_file(
+                filename,
+                mimetype,
+                content,
+                process=True,
+                user=user,
+                __request__=__request__,
             )
 
-            # Connect to NAS
-            session = await connect_handler(username, password, __event_call__)
+            collections.append(file_collection)
 
-            await self._emit_status(
-                __event_emitter__,
-                f"Inspecting {len(files)} files...",
-                done=False,
-            )
+        # Query the collection using the retrieval engine
+        collection_results = await query_collection_handler(
+            __request__,
+            QueryCollectionsForm(
+                collection_names=collections,
+                query=query,
+            ),
+            user=user,
+        )
 
-            collections = []
+        results = {}
 
-            for path in files:
-                filename = os.path.basename(path)
-                mimetype, encoding = mimetypes.guess_type(filename)
-
-                # Exclude audio and video files
-                if self._is_media(mimetype, checklist=["audio/", "video/"]):
-                    raise TypeError(f"Invalid mimetype '{mimetype}' for '{path}'")
-
-                log.info(f"Downloading '{path}'")
-                content = await asyncio.to_thread(download_handler, session, path)
-
-                # Upload file and process content
-                file_id, file_collection = await self._upload_file(
-                    filename,
-                    mimetype,
-                    content,
-                    process=True,
-                    user=user,
-                    __request__=__request__,
+        # Generate query-focused results (instead of relying on raw results)
+        for distances, metadatas, documents in zip(
+            collection_results.get("distances", []),
+            collection_results.get("metadatas", []),
+            collection_results.get("documents", []),
+        ):
+            for distance, metadata, document in zip(distances, metadatas, documents):
+                name = metadata.get("name")
+                source = metadata.get("file_id")
+                source_hash = blake2b(source.encode()).hexdigest()
+                # Get existing snippets if source already in results
+                snippets = results.get(source_hash, {}).get("snippets", [])
+                # Add new source to results or update existing source with new snippets
+                results.update(
+                    {
+                        source_hash: {
+                            "filename": name,
+                            "id": source,
+                            "snippets": snippets + [document],
+                        }
+                    }
                 )
 
-                collections.append(file_collection)
+        await self._emit_status(
+            __event_emitter__,
+            f"{len(results)} results found.",
+            done=True,
+        )
 
-            # Query the collection using the retrieval engine
-            collection_results = await query_collection_handler(
-                __request__,
-                QueryCollectionsForm(
-                    collection_names=collections,
-                    query=query,
-                ),
-                user=user,
-            )
+        return json.dumps(list(results.values()), ensure_ascii=False)
 
-            results = {}
-
-            # Generate query-focused results (instead of relying on raw results)
-            for distances, metadatas, documents in zip(
-                collection_results.get("distances", []),
-                collection_results.get("metadatas", []),
-                collection_results.get("documents", []),
-            ):
-                for distance, metadata, document in zip(
-                    distances, metadatas, documents
-                ):
-                    name = metadata.get("name")
-                    source = metadata.get("file_id")
-                    source_hash = blake2b(source.encode()).hexdigest()
-                    # Get existing snippets if source already in results
-                    snippets = results.get(source_hash, {}).get("snippets", [])
-                    # Add new source to results or update existing source with new snippets
-                    results.update(
-                        {
-                            source_hash: {
-                                "filename": name,
-                                "id": source,
-                                "snippets": snippets + [document],
-                            }
-                        }
-                    )
-
-            await self._emit_status(
-                __event_emitter__,
-                f"{len(results)} results found.",
-                done=True,
-            )
-
-            return json.dumps(list(results.values()), ensure_ascii=False)
-
-        except SynologyAPIException as e:
-            log.error(f"{e} = {e.error}")
-            return json.dumps({"error": str(e)})
-
-        except Exception as e:
-            log.exception(e)
-            return json.dumps({"error": str(e)})
-
-        finally:
-            # Disconnect from NAS
-            self._disconnect(session)
-
+    @with_session
     async def fetch_nas_files(
         self,
         files: list,
@@ -1085,87 +1081,55 @@ class Tools:
         :param files: A list of path for files to fetch
         :return: JSON with results containing filename, file ID and download URL for each file
         """
-        session = None
-        try:
-            if __request__ is None:
-                raise ValueError("Request context not available")
-            if __user__ is None:
-                raise ValueError("User context not available")
+        user, session, browse_handler, download_handler = self.context.get()
 
-            user = UserModel(**__user__)
-            username, password = self._get_credentials(__user__.get("valves"))
+        await self._emit_status(
+            __event_emitter__,
+            f"Fetching {len(files)} files...",
+            done=False,
+        )
 
-            # Get handlers depending on protocol
-            connect_handler, browse_handler, download_handler = self._get_handlers()
+        results = {}
 
-            await self._emit_status(
-                __event_emitter__,
-                "Connecting to NAS...",
-                done=False,
+        for path in files:
+            filename = os.path.basename(path)
+            mimetype, encoding = mimetypes.guess_type(filename)
+
+            # Exclude video files
+            if self._is_media(mimetype, checklist=["video/"]):
+                raise TypeError(f"Invalid mimetype '{mimetype}' for '{path}'")
+
+            log.info(f"Downloading '{path}'")
+            content = await asyncio.to_thread(download_handler, session, path)
+
+            # Upload file but do not process content
+            file_id, file_collection = await self._upload_file(
+                filename,
+                mimetype,
+                content,
+                process=False,
+                user=user,
+                __request__=__request__,
             )
 
-            # Connect to NAS
-            session = await connect_handler(username, password, __event_call__)
-
-            await self._emit_status(
-                __event_emitter__,
-                f"Fetching {len(files)} files...",
-                done=False,
-            )
-
-            results = {}
-
-            for path in files:
-                filename = os.path.basename(path)
-                mimetype, encoding = mimetypes.guess_type(filename)
-
-                # Exclude video files
-                if self._is_media(mimetype, checklist=["video/"]):
-                    raise TypeError(f"Invalid mimetype '{mimetype}' for '{path}'")
-
-                log.info(f"Downloading '{path}'")
-                content = await asyncio.to_thread(download_handler, session, path)
-
-                # Upload file but do not process content
-                file_id, file_collection = await self._upload_file(
-                    filename,
-                    mimetype,
-                    content,
-                    process=False,
-                    user=user,
-                    __request__=__request__,
-                )
-
-                # Build download link
-                results.update(
-                    {
-                        file_id: {
-                            "filename": filename,
-                            "id": file_id,
-                            "url": (
-                                f'{str(__request__.base_url).rstrip("/")}'
-                                f"/api/v1/files/{file_id}/content?attachment=true"
-                            ),
-                        }
+            # Build download link
+            results.update(
+                {
+                    file_id: {
+                        "filename": filename,
+                        "id": file_id,
+                        "url": (
+                            f'{str(__request__.base_url).rstrip("/")}'
+                            f"/api/v1/files/{file_id}/content?attachment=true"
+                        ),
                     }
-                )
-
-            await self._emit_status(
-                __event_emitter__,
-                f"{len(results)} results found.",
-                done=True,
+                }
             )
 
-            return json.dumps(list(results.values()), ensure_ascii=False)
+        await self._emit_status(
+            __event_emitter__,
+            f"{len(results)} results found.",
+            done=True,
+        )
 
-        except SynologyAPIException as e:
-            log.error(f"{e} = {e.error}")
-            return json.dumps({"error": str(e)})
-
-        except Exception as e:
-            log.exception(e)
-            return json.dumps({"error": str(e)})
-
-        finally:
-            # Disconnect from NAS
-            self._disconnect(session)
+        return json.dumps(list(results.values()), ensure_ascii=False)
